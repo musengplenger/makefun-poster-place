@@ -73,6 +73,15 @@ def tinted(noise, dark, light):
     return Image.composite(light_img, dark_img, noise)
 
 
+def blotch(base, mask, seed, dark, light, alpha, scales=((5, 0.5), (11, 0.3), (26, 0.2))):
+    """Large-scale blotchy texture: coarse value-noise patches (100px+ down
+    to ~40px) blended hard, clipped to mask — so no surface reads as one
+    flat colour. Fine grain alone does NOT do this."""
+    n = noise_field(W, H, seed, scales)
+    tex = tinted(n, dark, light)
+    base.paste(Image.blend(base, tex, alpha), (0, 0), mask)
+
+
 def soft_layer():
     return Image.new("RGBA", (W, H), (0, 0, 0, 0))
 
@@ -132,17 +141,24 @@ def paint_sky(base):
         (1.00, (242, 172, 100)),
     ])
     base.paste(sky, (0, 16))
-    # soft warm clouds: two noise bands, blurred, pink-amber lit
+    # soft warm clouds: LARGE soft masses (coarse noise, 100px+ scale),
+    # pink-amber lit, blurred — no flat sky band
     for (y0, y1, seed, col, alpha) in [
-        (150, 330, 11, (226, 138, 130), 70),
-        (380, 560, 23, (244, 178, 120), 90),
+        (150, 330, 11, (226, 138, 130), 95),
+        (380, 560, 23, (244, 178, 120), 110),
     ]:
-        n = noise_field(W, y1 - y0, seed, ((10, 0.6), (22, 0.4)))
-        n = n.point(lambda v: 0 if v < 110 else int((v - 110) * 1.6))
+        n = noise_field(W, y1 - y0, seed, ((5, 0.65), (12, 0.35)))
+        n = n.point(lambda v: 0 if v < 95 else int((v - 95) * 1.5))
         band = Image.new("RGB", (W, y1 - y0), col)
         layer = soft_layer()
         layer.paste(band, (0, y0), n)
-        paste(base, layer, blur=9)
+        paste(base, layer, blur=12)
+    # horizon haze: warm amber glow band above the sea line
+    n = noise_field(W, 90, 29, ((4, 0.7), (9, 0.3)))
+    n = n.point(lambda v: int(v * 0.55))
+    layer = soft_layer()
+    layer.paste(Image.new("RGB", (W, 90), (250, 186, 120)), (0, 540), n)
+    paste(base, layer, blur=10)
     # faint high violet clouds
     n = noise_field(W, 220, 37, ((6, 0.7), (14, 0.3)))
     n = n.point(lambda v: 0 if v < 150 else int((v - 150) * 0.9))
@@ -208,10 +224,28 @@ def paint_sea(base):
         (1.00, (12, 56, 64)),
     ])
     base.paste(sea, (0, 600))
-    # water texture: fine noise, tinted teal, low alpha
-    n = noise_field(W, 270, 41, ((24, 0.55), (48, 0.45)))
-    tex = tinted(n, (10, 48, 56), (44, 132, 122))
-    base.paste(Image.blend(base.crop((0, 600, W, 870)), tex, 0.12), (0, 600))
+    # amber glow where the moon path falls on the water
+    draw_glow(base, MOON[0], 650, 280, (244, 176, 100), peak=85, blur=2)
+    # large wave texture: coarse blotches, deep teal <-> bright teal, hard blend
+    seamask = Image.new("L", (W, H), 0)
+    ImageDraw.Draw(seamask).rectangle([0, 600, W, 870], fill=255)
+    blotch(base, seamask, 41, (6, 30, 38), (72, 168, 150), 0.55,
+           scales=((6, 0.5), (15, 0.3), (34, 0.2)))
+    blotch(base, seamask, 43, (14, 62, 66), (214, 158, 92), 0.22,
+           scales=((4, 0.6), (10, 0.4)))
+    # big soft wave masses across the sea, not just near the moon path
+    layer = soft_layer()
+    d = ImageDraw.Draw(layer)
+    r = rng(47)
+    for _ in range(12):
+        x = r.uniform(40, 620)
+        y = r.uniform(620, 840)
+        rw = r.uniform(60, 150)
+        rh = r.uniform(6, 14)
+        col = ((180, 225, 205, r.randrange(20, 55)) if r.random() < 0.6
+               else (8, 40, 48, r.randrange(30, 70)))
+        d.ellipse([x - rw, y - rh, x + rw, y + rh], fill=col)
+    paste(base, layer, blur=4)
     # distant headland, right horizon, hazy purple
     layer = soft_layer()
     d = ImageDraw.Draw(layer)
@@ -227,12 +261,16 @@ def paint_sea(base):
         spread = 14 + (y - 600) * 0.42
         for _ in range(r.randrange(1, 4)):
             x = MOON[0] + r.uniform(-spread, spread)
-            ln = r.uniform(8, 46) * (0.6 + (y - 600) / 400)
-            a = r.randrange(50, 185)
+            ln = r.uniform(10, 70) * (0.6 + (y - 600) / 400)
+            a = r.randrange(60, 210)
             d.line([(x - ln / 2, y), (x + ln / 2, y)],
-                   fill=(255, 228, 164, a), width=r.choice([1, 2, 2, 3]))
+                   fill=(255, 228, 164, a), width=r.choice([1, 2, 2, 3, 4]))
         y += r.randrange(5, 9)
     paste(base, layer, blur=1)
+    # bright glow knots on the moon path
+    for gy in (640, 690, 745, 800):
+        draw_glow(base, MOON[0] + rng(31).uniform(-30, 30), gy, 26,
+                  (255, 222, 150), peak=90)
     # gentle wave streaks
     layer = soft_layer()
     d = ImageDraw.Draw(layer)
@@ -259,6 +297,22 @@ def arch_mask():
     d.pieslice([436, 238, 854, 630], 180, 360, fill=255)
     d.pieslice([540, 322, 750, 630], 180, 360, fill=0)
     d.rectangle([540, 440, 750, 723], fill=0)
+    # roughen the silhouette: bites and bumps along the outer edges and
+    # the dome arc, so the arch edge reads as wavy rock, not a cut-out
+    r = rng(49)
+    for y in range(260, 720, 14):
+        rr = r.randrange(3, 11)
+        d.ellipse([436 - rr, y - rr, 436 + rr, y + rr],
+                  fill=0 if r.random() < 0.5 else 255)
+        d.ellipse([854 - rr, y - rr, 854 + rr, y + rr],
+                  fill=0 if r.random() < 0.5 else 255)
+    for k in range(26):
+        a = math.pi + k * math.pi / 25
+        x = 645 + 209 * math.cos(a)
+        y = 434 + 196 * math.sin(a)
+        rr = r.randrange(3, 10)
+        d.ellipse([x - rr, y - rr, x + rr, y + rr],
+                  fill=0 if r.random() < 0.5 else 255)
     return m
 
 
@@ -271,10 +325,20 @@ def paint_arch(base):
         (1.00, (82, 54, 38)),
     ])
     base.paste(rock, (0, 0), mask)
-    # rock grain: coarser value noise, warm brown variation
-    n = noise_field(W, H, 51, ((8, 0.6), (18, 0.4)))
-    tex = tinted(n, (88, 56, 38), (222, 178, 120))
-    base.paste(Image.blend(base, tex, 0.35), (0, 0), mask)
+    # large blotchy stone: coarse patches, hard contrast — never one flat tan
+    blotch(base, mask, 51, (56, 32, 20), (238, 196, 132), 0.55,
+           scales=((4, 0.5), (9, 0.35), (22, 0.15)))
+    blotch(base, mask, 55, (120, 74, 44), (250, 216, 160), 0.30,
+           scales=((7, 0.6), (18, 0.4)))
+    # cool shadow wash on the outer-left face (away from the moon)
+    shl = Image.new("L", (W, H), 0)
+    dsl = ImageDraw.Draw(shl)
+    for x in range(430, 650):
+        a = int(120 * (650 - x) / 220)
+        dsl.line([(x, 238), (x, 723)], fill=a)
+    shl = shl.filter(ImageFilter.GaussianBlur(20))
+    cool = Image.new("RGB", (W, H), (46, 34, 58))
+    base.paste(Image.composite(cool, base, shl), (0, 0), mask)
     # horizontal strata, wavy and irregular, clipped to the arch
     layer = soft_layer()
     d = ImageDraw.Draw(layer)
@@ -286,13 +350,17 @@ def paint_arch(base):
             pts.append((x, y + r.randrange(-7, 8) + 10 * math.sin(k * 0.9)))
         d.line(pts, fill=(70, 44, 30, 48), width=2)
         d.line([(x, yy + 3) for (x, yy) in pts], fill=(240, 200, 140, 26), width=2)
-    # a few short vertical cracks
+    # a few short vertical cracks, each with a dark line and a light
+    # companion line so they read as shadowed depth, not drawn strokes
     for _ in range(7):
         x = r.randrange(460, 830)
         y = r.randrange(300, 620)
         ln = r.randrange(18, 44)
-        d.line([(x, y), (x + r.randrange(-6, 7), y + ln)],
-               fill=(64, 40, 28, 70), width=2)
+        dx = r.randrange(-6, 7)
+        d.line([(x, y), (x + dx, y + ln)],
+               fill=(64, 40, 28, 70), width=3)
+        d.line([(x + 3, y), (x + dx + 3, y + ln)],
+               fill=(240, 200, 140, 60), width=2)
     strata = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     strata.paste(layer, (0, 0), mask)
     paste(base, strata, blur=2)
@@ -349,9 +417,10 @@ def paint_cliff_town(base):
         (1.00, (52, 32, 32)),
     ])
     base.paste(cliff, (0, 0), mask)
-    n = noise_field(W, H, 61, ((12, 0.55), (30, 0.45)))
-    tex = tinted(n, (48, 30, 28), (150, 96, 72))
-    base.paste(Image.blend(base, tex, 0.20), (0, 0), mask)
+    # large blotchy cliff rock, hard contrast + warm light from the top
+    blotch(base, mask, 61, (40, 24, 22), (186, 126, 92), 0.62,
+           scales=((4, 0.5), (10, 0.3), (24, 0.2)))
+    draw_glow(base, 180, 440, 200, (255, 196, 120), peak=55, blur=2)
     # warm rim on the cliff top edge
     layer = soft_layer()
     d = ImageDraw.Draw(layer)
@@ -373,6 +442,9 @@ def paint_cliff_town(base):
         d.rectangle([x, y, x + hw, y + hh], fill=r.choice(walls) + (255,))
         d.polygon([(x - 3, y), (x + hw / 2, y - 12), (x + hw + 3, y)],
                   fill=(96, 58, 44, 255))
+        # lit face (left) vs shadow face (right third) — no flat walls
+        d.rectangle([x + hw - hw // 3, y, x + hw, y + hh], fill=(0, 0, 0, 70))
+        d.line([(x, y), (x, y + hh)], fill=(255, 220, 160, 130), width=2)
         for wx in (8, hw - 16):
             d.rectangle([x + wx, y + 10, x + wx + 8, y + 20],
                         fill=(255, 198, 92, 255))
@@ -428,11 +500,10 @@ def paint_terrace(base):
         (1.00, (52, 40, 34)),
     ])
     base.paste(stone, (0, 862))
-    n = noise_field(W, 150, 71, ((10, 0.55), (24, 0.45)))
-    tex = tinted(n, (44, 34, 28), (128, 100, 76))
-    tex = Image.blend(base.crop((0, 862, W, 1012)), tex, 0.35)
-    base.paste(Image.composite(tex, base.crop((0, 862, W, 1012)),
-                               mask.crop((0, 862, W, 1012))), (0, 862))
+    # large blotchy stone floor — no flat band; moon-side light pool
+    blotch(base, mask, 71, (36, 28, 22), (150, 118, 88), 0.50,
+           scales=((5, 0.5), (12, 0.3), (28, 0.2)))
+    draw_glow(base, 700, 920, 220, (255, 200, 130), peak=40, blur=2)
     # tile seams on the floor
     layer = soft_layer()
     d = ImageDraw.Draw(layer)
@@ -470,7 +541,11 @@ def paint_couple(base):
                (wx + 34, 922), (wx - 34, 922)], fill=(178, 86, 60, 255))
     d.polygon([(wx + 8, 830), (wx + 24, 830), (wx + 30, 844), (wx + 34, 922),
                (wx + 16, 922)], fill=(140, 62, 44, 255))                # shade side
+    d.polygon([(wx - 30, 844), (wx - 24, 830), (wx - 6, 830), (wx - 10, 922),
+               (wx - 34, 922)], fill=(214, 116, 84, 255))               # lit side
     d.line([(wx - 28, 872), (wx + 28, 872)], fill=(120, 52, 38, 255), width=3)  # belt
+    # hair highlight on her hat brim edge
+    d.arc([wx - 34, 788, wx + 34, 810], 200, 340, fill=(255, 226, 170, 220), width=3)
     # her arm resting on the rail
     d.line([(wx + 22, 852), (wx + 52, 866)], fill=(178, 86, 60, 255), width=9)
     d.ellipse([wx + 46, 860, wx + 58, 872], fill=(198, 140, 102, 255))
@@ -483,7 +558,12 @@ def paint_couple(base):
                (mx + 34, 922), (mx - 34, 922)], fill=(232, 220, 196, 255))
     d.polygon([(mx + 10, 826), (mx + 26, 826), (mx + 32, 840), (mx + 34, 922),
                (mx + 16, 922)], fill=(196, 182, 152, 255))              # shade side
+    d.polygon([(mx - 32, 840), (mx - 26, 826), (mx - 8, 826), (mx - 12, 922),
+               (mx - 34, 922)], fill=(250, 242, 222, 255))              # lit side
     d.line([(mx - 12, 826), (mx + 12, 826)], fill=(180, 166, 136, 255), width=3)  # collar
+    # skin shading: darker edge on the right of his head, light on the left
+    d.arc([mx - 13, 796, mx + 13, 822], 300, 60, fill=(150, 100, 70, 200), width=3)
+    d.arc([mx - 13, 796, mx + 13, 822], 120, 240, fill=(255, 224, 180, 200), width=3)
     # his arm resting on the rail
     d.line([(mx - 22, 852), (mx - 52, 866)], fill=(232, 220, 196, 255), width=9)
     d.ellipse([mx - 58, 860, mx - 46, 872], fill=(206, 152, 112, 255))
@@ -499,6 +579,8 @@ def paint_table(base):
     layer = soft_layer()
     d = ImageDraw.Draw(layer)
     tx, ty = 492, 902
+    # soft drop shadow on the floor under the table
+    d.ellipse([tx - 56, ty + 38, tx + 56, ty + 52], fill=(20, 14, 12, 130))
     d.ellipse([tx - 52, ty - 10, tx + 52, ty + 10], fill=(210, 184, 148, 255))
     d.ellipse([tx - 52, ty - 10, tx + 52, ty + 2], fill=(238, 216, 178, 255))
     d.line([(tx, ty + 6), (tx, ty + 40)], fill=(90, 68, 48, 255), width=5)
@@ -520,6 +602,12 @@ def paint_flowers(base):
     r = rng(83)
     for (cx, cy, rx, ry) in [(78, 920, 84, 62), (946, 918, 84, 62),
                              (60, 872, 60, 40), (962, 868, 60, 40)]:
+        # soft drop shadow on the floor under each cluster
+        layer = soft_layer()
+        d = ImageDraw.Draw(layer)
+        d.ellipse([cx - rx, cy + ry - 10, cx + rx, cy + ry + 12],
+                  fill=(20, 14, 12, 110))
+        paste(base, layer, blur=3)
         layer = soft_layer()
         d = ImageDraw.Draw(layer)
         for _ in range(46):
